@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Custom CSS for Styling (Matching React App look) ---
+# --- Custom CSS for Styling ---
 st.markdown("""
 <style>
     .report-header { background-color: #f0fdfa; padding: 20px; border-radius: 10px; border-bottom: 2px solid #e5e7eb; margin-bottom: 20px; }
@@ -25,12 +25,10 @@ st.markdown("""
     .summary-box { background-color: #f9fafb; padding: 15px; border-left: 5px solid #2dd4bf; margin-bottom: 20px; }
     .figure-box { border: 1px solid #e5e7eb; border-radius: 8px; padding: 15px; margin-bottom: 20px; background-color: white; }
     .novelty-box { background-color: #eff6ff; padding: 15px; border-left: 5px solid #3b82f6; }
-    .author-box { background-color: #eef2ff; padding: 15px; border-radius: 8px; margin-top: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- Types & Schema (Mirroring types.ts) ---
-# Gemini SDK for Python uses dictionaries for schema
+# --- Types & Schema ---
 ANALYSIS_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -39,14 +37,14 @@ ANALYSIS_SCHEMA = {
         "journal_authors": {"type": "STRING", "description": "Journal name and author list."},
         "publication_year": {"type": "STRING", "description": "Year of publication."},
         "background_objective": {"type": "STRING", "description": "Research background and objective in Japanese."},
-        "results_summary": {"type": "STRING", "description": "Comprehensive summary of results/discussion in Japanese."},
+        "results_summary": {"type": "STRING", "description": "Comprehensive summary of results/discussion in Japanese. Must logically connect the experimental data."},
         "results_figures": {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
                 "properties": {
                     "label": {"type": "STRING", "description": "e.g., Figure 1"},
-                    "explanation": {"type": "STRING", "description": "Detailed explanation in Japanese."},
+                    "explanation": {"type": "STRING", "description": "Detailed Japanese explanation of what this specific Figure/Table/Scheme shows, interpreted in the context of the results."},
                     "page_number": {"type": "INTEGER", "description": "1-based page number."},
                     "bbox": {
                         "type": "ARRAY",
@@ -67,7 +65,7 @@ ANALYSIS_SCHEMA = {
 
 def init_gemini_client():
     api_key = os.environ.get("GEMINI_API_KEY")
-    # Streamlit Cloud uses st.secrets, usually mapped to env vars, but let's check st.secrets too
+    # Check st.secrets for Streamlit Cloud
     if not api_key and "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
     
@@ -78,9 +76,20 @@ def init_gemini_client():
 def analyze_pdf_with_gemini(client, file_bytes):
     system_instruction = """
     あなたは優秀な化学者です。英語の化学論文(PDF)を深く読み込み、日本の研究者が理解しやすいように高度な要約を作成してください。
-    情報は省略せず、詳細に記述してください。特に発行年(Publication Year)を特定し、
-    Figure/Table/Schemeの位置情報(page_number, bbox)を正確に抽出してください。
-    bboxは[ymin, xmin, ymax, xmax] (0-1000スケール)です。
+    
+    以下の点を重視し、情報は省略せず、論理的なつながりを意識して詳細に記述してください:
+    1. タイトルは英語と日本語の両方を出力。
+    2. 雑誌名と著者を特定。
+    3. 【重要】論文の発行年(Publication Year)を必ず特定してください。
+    4. 目的・動機・背景を明確に。
+    5. 「実験結果・考察」は特に深く分析してください:
+         - まず、実験の流れ、条件、主要な発見を含む包括的な要約記述 (results_summary)。ここで図表(Figure, Table, Scheme等)の番号を参照しながら、なぜその実験を行ったのか、結果から何が言えるのかを論理的に説明してください。
+         - その後、個々の図・表・スキーム (Figure, Table, Scheme) についての詳細な解説と、PDF内での位置情報 (results_figures)。
+    6. 図表やスキームの位置情報(page_number, bbox)は、画像を切り出すために非常に重要ですので、正確に指定してください。bboxは[ymin, xmin, ymax, xmax] (0-1000スケール)です。
+    7. 新規性と学術的な面白さを化学者の視点で深く評価。
+    8. 結論と残された課題。
+    
+    出力はJSON形式で行ってください。
     """
     
     try:
@@ -98,7 +107,8 @@ def analyze_pdf_with_gemini(client, file_bytes):
                 system_instruction=system_instruction,
                 response_mime_type="application/json",
                 response_schema=ANALYSIS_SCHEMA,
-                thinking_config=types.ThinkingConfig(thinking_budget=10240)
+                # Thinking budget increased to 16000 for deeper analysis
+                thinking_config=types.ThinkingConfig(thinking_budget=16000)
             )
         )
         return json.loads(response.text)
@@ -155,34 +165,6 @@ def extract_images_from_pdf(file_bytes, analysis_data):
     analysis_data["results_figures"] = enriched_figures
     return analysis_data
 
-def search_authors(client, authors, title):
-    prompt = f"""
-    以下の論文の著者、あるいは研究グループについてWeb検索を行い、彼らの過去の研究背景や、今回の論文との関連性を日本語で簡潔にまとめてください。
-    論文タイトル: {title}
-    著者情報: {authors}
-    """
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
-        )
-        
-        source_urls = []
-        if response.candidates[0].grounding_metadata.grounding_chunks:
-            for chunk in response.candidates[0].grounding_metadata.grounding_chunks:
-                if chunk.web and chunk.web.uri:
-                    source_urls.append(chunk.web.uri)
-                    
-        return {
-            "summary": response.text,
-            "source_urls": list(set(source_urls))
-        }
-    except Exception as e:
-        return {"summary": f"Error: {str(e)}", "source_urls": []}
-
 # --- Auth Logic ---
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -221,8 +203,8 @@ if 'analysis_result' not in st.session_state:
 
 if uploaded_file is not None:
     # Button to start analysis
-    if st.button("論文を解析する", type="primary"):
-        with st.spinner("Gemini 3.0 Flash が論文を読んでいます... (これには数分かかる場合があります)"):
+    if st.button("論文を解析する (Deep Analysis)", type="primary"):
+        with st.spinner("Gemini 3.0 Flash が論文を深く読み込んでいます... (思考中...)"):
             file_bytes = uploaded_file.read()
             raw_analysis = analyze_pdf_with_gemini(client, file_bytes)
             
@@ -285,31 +267,7 @@ if result:
     st.markdown('<div class="section-header">4. 結論・今後の課題</div>', unsafe_allow_html=True)
     st.write(result['conclusion_tasks'])
 
-    # 5. Author Search (On Demand)
-    st.markdown('<div class="section-header">5. 著者・研究室の背景情報</div>', unsafe_allow_html=True)
-    
-    if 'author_info' not in st.session_state:
-        st.session_state.author_info = None
-
-    if st.button("著者情報をWeb検索する (Gemini 2.5)"):
-        with st.spinner("著者を調査中..."):
-            author_info = search_authors(client, result['journal_authors'], result['title_en'])
-            st.session_state.author_info = author_info
-
-    if st.session_state.author_info:
-        info = st.session_state.author_info
-        st.markdown(f"""
-        <div class="author-box">
-            {info['summary']}
-        </div>
-        """, unsafe_allow_html=True)
-        if info['source_urls']:
-            st.caption("参照ソース:")
-            for url in info['source_urls']:
-                st.markdown(f"- [{url}]({url})")
-
     # Reset Button
     if st.button("別の論文を解析する"):
         st.session_state.analysis_result = None
-        st.session_state.author_info = None
         st.rerun()
