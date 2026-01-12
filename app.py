@@ -44,12 +44,12 @@ ANALYSIS_SCHEMA = {
                 "type": "OBJECT",
                 "properties": {
                     "label": {"type": "STRING", "description": "e.g., Figure 1"},
-                    "explanation": {"type": "STRING", "description": "Detailed Japanese explanation of what this specific Figure/Table/Scheme shows, interpreted in the context of the results."},
+                    "explanation": {"type": "STRING", "description": "Detailed Japanese explanation. If the figure has sub-parts like (a), (b), describe each part specifically."},
                     "page_number": {"type": "INTEGER", "description": "1-based page number."},
                     "bbox": {
                         "type": "ARRAY",
                         "items": {"type": "INTEGER"},
-                        "description": "[ymin, xmin, ymax, xmax] 0-1000 scale"
+                        "description": "[ymin, xmin, ymax, xmax] 0-1000 scale. MUST INCLUDE THE CAPTION TEXT."
                     }
                 },
                 "required": ["label", "explanation", "page_number", "bbox"]
@@ -85,9 +85,12 @@ def analyze_pdf_with_gemini(client, file_bytes):
     5. 「実験結果・考察」は特に深く分析してください:
          - まず、実験の流れ、条件、主要な発見を含む包括的な要約記述 (results_summary)。ここで図表(Figure, Table, Scheme等)の番号を参照しながら、なぜその実験を行ったのか、結果から何が言えるのかを論理的に説明してください。
          - その後、個々の図・表・スキーム (Figure, Table, Scheme) についての詳細な解説と、PDF内での位置情報 (results_figures)。
-    6. 図表やスキームの位置情報(page_number, bbox)は、画像を切り出すために非常に重要ですので、正確に指定してください。bboxは[ymin, xmin, ymax, xmax] (0-1000スケール)です。
-    7. 新規性と学術的な面白さを化学者の視点で深く評価。
-    8. 結論と残された課題。
+    
+    【図表情報の抽出に関する極めて重要な指示】:
+    - **bbox (座標)**: 図版のビジュアル部分だけでなく、**その下(または上)にある「Figure X. description...」といったキャプションテキスト全体まで完全に含んだ領域**を指定してください。キャプションが途切れないように広く取ってください。
+    - **explanation (解説)**: 
+        - 単なる翻訳ではなく、その図が結果の文脈で何を意味するかを解説してください。
+        - 図の中に **(a), (b), (c)** などのサブパートがある場合は、解説欄で必ず「(a) ... (b) ...」のように区別して記述してください。
     
     出力はJSON形式で行ってください。
     """
@@ -99,7 +102,7 @@ def analyze_pdf_with_gemini(client, file_bytes):
                 types.Content(
                     parts=[
                         types.Part.from_bytes(data=file_bytes, mime_type='application/pdf'),
-                        types.Part.from_text(text="この論文を解析し、JSON形式で出力してください。")
+                        types.Part.from_text(text="この論文を解析し、JSON形式で出力してください。bboxは必ずキャプションを含めてください。")
                     ]
                 )
             ],
@@ -117,7 +120,7 @@ def analyze_pdf_with_gemini(client, file_bytes):
         return None
 
 def extract_images_from_pdf(file_bytes, analysis_data):
-    """PyMuPDFを使ってbboxに基づき画像を切り出す"""
+    """PyMuPDFを使ってbboxに基づき画像を切り出す。キャプション切れ防止のためマージンを調整。"""
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     enriched_figures = []
     
@@ -137,24 +140,30 @@ def extract_images_from_pdf(file_bytes, analysis_data):
                 # bbox from Gemini is [ymin, xmin, ymax, xmax]
                 ymin, xmin, ymax, xmax = bbox
                 
-                # Add padding
-                padding = 20
                 h = rect.height
                 w = rect.width
                 
-                y1 = max(0, (ymin - padding) / 1000 * h)
-                x1 = max(0, (xmin - padding) / 1000 * w)
-                y2 = min(h, (ymax + padding) / 1000 * h)
-                x2 = min(w, (xmax + padding) / 1000 * w)
+                # --- マージン設定 (ここを強化) ---
+                # キャプションを含めるため、下部(Bottom)を特に広く取る
+                pad_top = 10
+                pad_bottom = 50  # キャプション用に大きめに確保
+                pad_horiz = 20
+                
+                y1 = max(0, (ymin / 1000 * h) - pad_top)
+                x1 = max(0, (xmin / 1000 * w) - pad_horiz)
+                y2 = min(h, (ymax / 1000 * h) + pad_bottom)
+                x2 = min(w, (xmax / 1000 * w) + pad_horiz)
                 
                 clip_rect = fitz.Rect(x1, y1, x2, y2)
-                pix = page.get_pixmap(clip=clip_rect, dpi=200)
+                
+                # 解像度を少し上げてテキストを読みやすくする (dpi=200 -> 250)
+                pix = page.get_pixmap(clip=clip_rect, dpi=250)
                 
                 # Convert to PIL Image for Streamlit
                 img_data = pix.tobytes("png")
                 image = Image.open(io.BytesIO(img_data))
                 
-                # Store object for display (cannot JSON serialize PIL image easily)
+                # Store object for display
                 fig["pil_image"] = image
                 
         except Exception as e:
@@ -252,7 +261,12 @@ if result:
             else:
                 st.info("画像なし")
         with col2:
-            st.write(fig['explanation'])
+            # Format explanation for better readability of (a), (b), etc.
+            explanation = fig['explanation']
+            # Simple replacement to bold sub-figure labels
+            formatted_explanation = explanation.replace("(a)", "\n\n**(a)**").replace("(b)", "\n\n**(b)**").replace("(c)", "\n\n**(c)**").replace("(d)", "\n\n**(d)**").replace("(e)", "\n\n**(e)**").replace("(f)", "\n\n**(f)**")
+            
+            st.markdown(formatted_explanation)
         st.divider()
 
     # 3. Novelty
