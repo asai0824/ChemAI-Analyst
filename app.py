@@ -146,7 +146,7 @@ def extract_images_from_pdf(file_bytes, analysis_data):
                 # --- マージン設定 (ここを強化) ---
                 # キャプションを含めるため、下部(Bottom)を特に広く取る
                 pad_top = 10
-                pad_bottom = 40  # 50は大きすぎたため40に変更
+                pad_bottom = 30  # 40でも大きいので30にする
                 pad_horiz = 20
                 
                 y1 = max(0, (ymin / 1000 * h) - pad_top)
