@@ -3,11 +3,14 @@ import os
 import json
 import base64
 import random
+import html as html_lib
+import re
 from google import genai
 from google.genai import types
 import fitz  # PyMuPDF
 from PIL import Image
 import io
+import streamlit.components.v1 as components
 
 # --- Page Config ---
 st.set_page_config(
@@ -195,6 +198,68 @@ def extract_images_from_pdf(file_bytes, analysis_data):
     analysis_data["results_figures"] = enriched_figures
     return analysis_data
 
+def format_text(text):
+    """Simple text formatter for HTML output"""
+    if not text:
+        return ""
+    # Escape HTML special characters
+    safe = html_lib.escape(text)
+    # Convert newlines to breaks
+    safe = safe.replace("\n", "<br>")
+    # Convert simple bold **text** to <strong>text</strong>
+    safe = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', safe)
+    return safe
+
+def generate_html_for_clipboard(result):
+    """
+    Generates a complete HTML string with inline styles and base64 images
+    suitable for pasting into OneNote/Word.
+    """
+    html = f"""
+    <div style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 800px;">
+        <h1 style="font-size: 24px; font-weight: bold; color: #111827; margin-bottom: 8px;">{format_text(result['title_jp'])}</h1>
+        <h2 style="font-size: 18px; color: #4b5563; margin-bottom: 8px;">{format_text(result['title_en'])}</h2>
+        <div style="margin-bottom: 24px; color: #6b7280; font-size: 14px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px;">
+            <span style="font-weight: bold;">{format_text(result['journal_authors'])}</span> | <span>{format_text(result.get('publication_year', 'N/A'))}</span>
+        </div>
+
+        <h3 style="font-size: 18px; font-weight: bold; color: #0f766e; border-bottom: 2px solid #ccfbf1; padding-bottom: 6px; margin-top: 24px; margin-bottom: 12px;">1. 目的・動機・研究背景</h3>
+        <p style="line-height: 1.6; margin-bottom: 16px;">{format_text(result['background_objective'])}</p>
+
+        <h3 style="font-size: 18px; font-weight: bold; color: #0f766e; border-bottom: 2px solid #ccfbf1; padding-bottom: 6px; margin-top: 24px; margin-bottom: 12px;">2. 実験結果・考察</h3>
+        <div style="background-color: #f9fafb; padding: 16px; border-left: 4px solid #2dd4bf; margin-bottom: 24px;">
+            <strong style="display: block; margin-bottom: 8px; color: #374151;">全体要約:</strong>
+            <p style="line-height: 1.6; margin: 0;">{format_text(result['results_summary'])}</p>
+        </div>
+    """
+    
+    for fig in result['results_figures']:
+        img_html = ""
+        if "pil_image" in fig:
+            # Convert PIL image to base64 for embedding in HTML
+            buffered = io.BytesIO()
+            fig["pil_image"].save(buffered, format="PNG")
+            img_b64 = base64.b64encode(buffered.getvalue()).decode()
+            img_html = f'<div style="text-align: center; margin-bottom: 16px;"><img src="data:image/png;base64,{img_b64}" style="max-width: 100%; height: auto; display: block; margin: 0 auto; max-height: 500px;" /></div>'
+        
+        html += f"""
+        <div style="margin-bottom: 32px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; background-color: #fff;">
+            <p style="font-weight: bold; color: #334155; margin-bottom: 12px; font-size: 16px;">{format_text(fig['label'])} (Page {fig.get('page_number', '?')})</p>
+            {img_html}
+            <p style="line-height: 1.6; color: #374151;">{format_text(fig['explanation'])}</p>
+        </div>
+        """
+        
+    html += f"""
+        <h3 style="font-size: 18px; font-weight: bold; color: #0f766e; border-bottom: 2px solid #ccfbf1; padding-bottom: 6px; margin-top: 24px; margin-bottom: 12px;">3. 新規性・学術的意義</h3>
+        <div style="line-height: 1.6; margin-bottom: 16px; background-color: #eff6ff; padding: 12px; border-left: 4px solid #3b82f6;">{format_text(result['novelty'])}</div>
+
+        <h3 style="font-size: 18px; font-weight: bold; color: #0f766e; border-bottom: 2px solid #ccfbf1; padding-bottom: 6px; margin-top: 24px; margin-bottom: 12px;">4. 結論・今後の課題</h3>
+        <p style="line-height: 1.6; margin-bottom: 16px;">{format_text(result['conclusion_tasks'])}</p>
+    </div>
+    """
+    return html
+
 # --- Auth Logic ---
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -302,6 +367,76 @@ if result:
     # 4. Conclusion
     st.markdown('<div class="section-header">4. 結論・今後の課題</div>', unsafe_allow_html=True)
     st.write(result['conclusion_tasks'])
+
+    # --- Copy Section for OneNote ---
+    st.divider()
+    st.subheader("📋 OneNote用コピー")
+    st.info("以下のボタンを押すと、画像を含むレポート全体をクリップボードにコピーします。OneNoteやWordに貼り付けてください。")
+    
+    # Generate HTML content
+    html_content = generate_html_for_clipboard(result)
+    # Serialize to JSON to safely embed in JS string
+    html_json = json.dumps(html_content)
+    
+    # Render Custom JS Button
+    components.html(f"""
+    <html>
+    <head>
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    </head>
+    <body style="margin: 0; padding: 0;">
+        <div style="display: flex; align-items: center;">
+            <button id="copyBtn" onclick="copyContent()" style="
+                background-color: #0f766e; 
+                color: white; 
+                border: none; 
+                padding: 12px 20px; 
+                border-radius: 8px; 
+                cursor: pointer; 
+                font-family: sans-serif; 
+                font-weight: bold;
+                font-size: 14px;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                transition: background-color 0.2s;
+            ">
+                <i class="fa-regular fa-clipboard"></i> レポートをコピー
+            </button>
+            <span id="status" style="margin-left: 15px; color: #0f766e; font-family: sans-serif; font-size: 14px; font-weight: bold;"></span>
+        </div>
+        <script>
+            async function copyContent() {{
+                const content = {html_json};
+                const btn = document.getElementById('copyBtn');
+                const status = document.getElementById('status');
+                
+                try {{
+                    const blob = new Blob([content], {{ type: 'text/html' }});
+                    const item = new ClipboardItem({{ 'text/html': blob }});
+                    await navigator.clipboard.write([item]);
+                    
+                    status.innerText = 'コピー成功！OneNoteに貼り付けてください';
+                    btn.style.backgroundColor = '#059669';
+                    btn.innerHTML = '<i class="fa-solid fa-check"></i> コピー完了';
+                    
+                    setTimeout(() => {{
+                        status.innerText = '';
+                        btn.style.backgroundColor = '#0f766e';
+                        btn.innerHTML = '<i class="fa-regular fa-clipboard"></i> レポートをコピー';
+                    }}, 3000);
+                }} catch (err) {{
+                    console.error('Failed to copy: ', err);
+                    status.innerText = 'エラー: 手動でコピーしてください';
+                    status.style.color = '#dc2626';
+                }}
+            }}
+        </script>
+    </body>
+    </html>
+    """, height=70)
+    # --------------------
 
     # Reset Button
     if st.button("別の論文を解析する"):
