@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import json
 import base64
+import random
 from google import genai
 from google.genai import types
 import fitz  # PyMuPDF
@@ -63,17 +64,46 @@ ANALYSIS_SCHEMA = {
 
 # --- Helper Functions ---
 
-def init_gemini_client():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    # Check st.secrets for Streamlit Cloud
-    if not api_key and "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
+def get_api_key():
+    """
+    Retrieves a random API key from a pool to distribute load.
+    Supports 'GEMINI_API_KEYS' (comma-separated list) or single 'GEMINI_API_KEY'.
+    """
+    keys = []
     
-    if not api_key:
-        return None
-    return genai.Client(api_key=api_key)
+    # 1. Check Streamlit Secrets for list or comma-separated string
+    if "GEMINI_API_KEYS" in st.secrets:
+        secret_keys = st.secrets["GEMINI_API_KEYS"]
+        if isinstance(secret_keys, list):
+            keys.extend(secret_keys)
+        elif isinstance(secret_keys, str):
+            keys.extend([k.strip() for k in secret_keys.split(",") if k.strip()])
 
-def analyze_pdf_with_gemini(client, file_bytes):
+    # 2. Check Environment Variable
+    env_keys = os.environ.get("GEMINI_API_KEYS")
+    if env_keys:
+        keys.extend([k.strip() for k in env_keys.split(",") if k.strip()])
+
+    # 3. Fallback to single key if no list found
+    if not keys:
+        single_key = os.environ.get("GEMINI_API_KEY")
+        if not single_key and "GEMINI_API_KEY" in st.secrets:
+            single_key = st.secrets["GEMINI_API_KEY"]
+        if single_key:
+            keys.append(single_key)
+
+    if not keys:
+        return None
+    
+    # Return a random key from the pool
+    return random.choice(keys)
+
+def analyze_pdf_with_gemini(api_key, file_bytes):
+    if not api_key:
+        raise ValueError("API Key not found.")
+        
+    client = genai.Client(api_key=api_key)
+
     system_instruction = """
     あなたは優秀な化学者です。英語の化学論文(PDF)を深く読み込み、日本の研究者が理解しやすいように高度な要約を作成してください。
     
@@ -113,8 +143,8 @@ def analyze_pdf_with_gemini(client, file_bytes):
         )
         return json.loads(response.text)
     except Exception as e:
-        st.error(f"Analysis Error: {str(e)}")
-        return None
+        # Rethrow to be caught by the caller
+        raise e
 
 def extract_images_from_pdf(file_bytes, analysis_data):
     """PyMuPDFを使ってbboxに基づき画像を切り出す"""
@@ -188,12 +218,12 @@ if not st.session_state.authenticated:
 
 # --- UI: Main App ---
 st.title("🧪 ChemAI Paper Analyst")
-st.caption("Powered by Gemini 3.0 Flash")
+st.caption("Powered by Gemini 3.0 Flash (Multi-Key Load Balancing)")
 
-client = init_gemini_client()
-
-if not client:
-    st.warning("⚠️ API Keyが設定されていません。GitHubのSecretsまたは環境変数 `GEMINI_API_KEY` を設定してください。")
+# Check if at least one key exists
+test_key = get_api_key()
+if not test_key:
+    st.warning("⚠️ API Keyが設定されていません。`GEMINI_API_KEYS` (カンマ区切り) または `GEMINI_API_KEY` を設定してください。")
     st.stop()
 
 uploaded_file = st.file_uploader("PDFファイルをアップロードしてください", type="pdf")
@@ -204,15 +234,21 @@ if 'analysis_result' not in st.session_state:
 if uploaded_file is not None:
     # Button to start analysis
     if st.button("論文を解析する (Deep Analysis)", type="primary"):
+        # Select a key specifically for this request
+        current_api_key = get_api_key()
+        
         with st.spinner("Gemini 3.0 Flash が論文を深く読み込んでいます... (思考中...)"):
             file_bytes = uploaded_file.read()
-            raw_analysis = analyze_pdf_with_gemini(client, file_bytes)
-            
-            if raw_analysis:
-                with st.spinner("図表を切り出しています..."):
-                    final_analysis = extract_images_from_pdf(file_bytes, raw_analysis)
-                    st.session_state.analysis_result = final_analysis
-                st.rerun()
+            try:
+                raw_analysis = analyze_pdf_with_gemini(current_api_key, file_bytes)
+                
+                if raw_analysis:
+                    with st.spinner("図表を切り出しています..."):
+                        final_analysis = extract_images_from_pdf(file_bytes, raw_analysis)
+                        st.session_state.analysis_result = final_analysis
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Analysis Failed: {str(e)}")
 
 # --- Display Results ---
 result = st.session_state.analysis_result
