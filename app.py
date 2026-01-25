@@ -309,41 +309,74 @@ def main():
     st.sidebar.title("🔬 PatentInsight AI")
     st.sidebar.caption("Speed & Bulk Edition")
     
-    # --- API Key Loading Logic (Multiple Keys) ---
-    api_keys = []
+    # --- API Key Loading Logic (Enhanced) ---
+    raw_api_keys = []
     
-    # 1. 環境変数/Secretsから複数のキーを探す
-    # API_KEY, API_KEY_1, API_KEY_2 ... API_KEY_10 まで探査
+    # 1. 探索: 環境変数から取得
     candidate_keys = ["API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]
     for i in range(1, 11):
         candidate_keys.append(f"API_KEY_{i}")
         candidate_keys.append(f"GOOGLE_API_KEY_{i}")
-
-    # SecretsとEnvから収集
-    found_keys = set()
+    
     for key_name in candidate_keys:
-        # Env check
-        if os.environ.get(key_name):
-            val = os.environ.get(key_name).strip()
-            if val and val not in found_keys:
-                found_keys.add(val)
-                api_keys.append(val)
-        # Secrets check
-        elif key_name in st.secrets:
-            val = st.secrets[key_name].strip()
-            if val and val not in found_keys:
-                found_keys.add(val)
-                api_keys.append(val)
+        val = os.environ.get(key_name)
+        if val: raw_api_keys.append(val)
 
-    if not api_keys:
+    # 2. 探索: Streamlit Secretsから賢く取得
+    # "API_KEYS" というリストがある場合
+    if "API_KEYS" in st.secrets:
+        val = st.secrets["API_KEYS"]
+        if isinstance(val, list):
+            raw_api_keys.extend(val)
+    
+    # 3. 探索: 全シークレットをスキャンして、値が "AIza" で始まるものをすべて拾う
+    # これにより、ユーザーがどんな変数名(例: MY_KEY_1)にしていても認識される
+    try:
+        for key, val in st.secrets.items():
+            # 値が文字列で、AIza(Google API Keyの接頭辞)で始まる場合
+            if isinstance(val, str) and val.strip().startswith("AIza"):
+                raw_api_keys.append(val)
+            # 値がリストの場合も中身をチェック
+            elif isinstance(val, list):
+                for v in val:
+                    if isinstance(v, str) and v.strip().startswith("AIza"):
+                        raw_api_keys.append(v)
+    except Exception:
+        pass # secretsアクセスでエラーが出ても無視
+
+    # 重複排除とクリーニング
+    valid_api_keys = []
+    seen = set()
+    for k in raw_api_keys:
+        k_clean = k.strip()
+        # プレースホルダーのテキストが入っている場合は除外
+        if k_clean and k_clean not in seen and k_clean.startswith("AIza") and "ここに" not in k_clean:
+            seen.add(k_clean)
+            valid_api_keys.append(k_clean)
+    
+    # --- Debug Information ---
+    if not valid_api_keys:
         st.sidebar.error("⛔ API Key Missing")
-        st.error("⚠️ APIキーが見つかりません。Secretsに `API_KEY` または `API_KEY_1`, `API_KEY_2`... を設定してください。")
+        st.error("⚠️ APIキーが見つかりません。")
+        
+        # デバッグ用: どんなキー名が見えているかヒントを表示
+        st.info("💡 ヒント: 現在設定されているSecretsのキー名（値は隠しています）")
+        try:
+            secret_keys_found = list(st.secrets.keys())
+            if secret_keys_found:
+                st.code(str(secret_keys_found))
+                st.markdown("APIキーの値は通常 `AIza` で始まります。正しくコピーされているか確認してください。")
+            else:
+                st.warning("Secretsが空です。Streamlit Cloudの設定画面を確認してください。")
+        except:
+            st.warning("Secretsにアクセスできません。")
+            
         st.stop()
     
-    st.sidebar.success(f"🔑 {len(api_keys)}個のAPIキーをロードしました")
+    st.sidebar.success(f"🔑 {len(valid_api_keys)}個のAPIキーを認識")
     
     # Create clients for all keys
-    clients = [Client(api_key=k) for k in api_keys]
+    clients = [Client(api_key=k) for k in valid_api_keys]
 
     st.sidebar.markdown("---")
     uploaded_file = st.sidebar.file_uploader("Excelファイルをアップロード", type=['xlsx', 'xls', 'xlsm'])
