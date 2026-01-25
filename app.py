@@ -1,287 +1,416 @@
+
 import streamlit as st
+import pandas as pd
 import os
-import json
-import base64
-from google import genai
+import time
+import asyncio
+import re
 from google.genai import types
-import fitz  # PyMuPDF
-from PIL import Image
-import io
+from google.genai import Client
 
 # --- Page Config ---
 st.set_page_config(
-    page_title="ChemAI Paper Analyst",
-    page_icon="🧪",
+    page_title="PatentInsight AI",
+    page_icon="🔬",
     layout="wide"
 )
 
-# --- Custom CSS for Styling ---
-st.markdown("""
+# --- Authentication Logic ---
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    if "APP_PASSWORD" not in st.secrets:
+        st.error("⚠️ 設定未完了: アプリのパスワード(APP_PASSWORD)が設定されていません。")
+        return False
+
+    def password_entered():
+        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.title("🔒 ログイン")
+        st.write("このアプリを使用するにはパスワードが必要です。")
+        st.text_input("パスワード", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.title("🔒 ログイン")
+        st.text_input("パスワード", type="password", on_change=password_entered, key="password")
+        st.error("パスワードが間違っています。")
+        return False
+    else:
+        return True
+
+# --- CSS Injection ---
+REPORT_CSS = """
 <style>
-    .report-header { background-color: #f0fdfa; padding: 20px; border-radius: 10px; border-bottom: 2px solid #e5e7eb; margin-bottom: 20px; }
-    .report-title { color: #111827; font-family: 'Noto Serif JP', serif; font-weight: bold; font-size: 2em; }
-    .report-meta { color: #6b7280; font-size: 0.9em; }
-    .section-header { color: #0f766e; border-bottom: 2px solid #ccfbf1; padding-bottom: 5px; margin-top: 30px; margin-bottom: 15px; font-weight: bold; font-size: 1.2em; }
-    .summary-box { background-color: #f9fafb; padding: 15px; border-left: 5px solid #2dd4bf; margin-bottom: 20px; }
-    .figure-box { border: 1px solid #e5e7eb; border-radius: 8px; padding: 15px; margin-bottom: 20px; background-color: white; }
-    .novelty-box { background-color: #eff6ff; padding: 15px; border-left: 5px solid #3b82f6; }
+    .report-content {
+        background-color: white;
+        color: #0f172a;
+        font-family: "Noto Sans JP", "Meiryo", sans-serif;
+        line-height: 1.8;
+        padding: 2rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 0.75rem;
+    }
+    .report-content h1 { 
+        font-size: 24px; font-weight: bold; color: #1e3a8a; 
+        border-bottom: 2px solid #1e3a8a; padding-bottom: 10px; 
+        margin-bottom: 20px; margin-top: 30px; 
+    }
+    .report-content h2 { 
+        font-size: 20px; font-weight: bold; color: #1e40af; 
+        background-color: #eff6ff; padding: 8px 12px; 
+        border-left: 5px solid #1e40af; margin-bottom: 16px; margin-top: 24px; 
+    }
+    .report-content h3 { 
+        font-size: 18px; font-weight: bold; color: #0f172a; 
+        border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; 
+        margin-bottom: 12px; margin-top: 20px; 
+    }
+    .report-content p { margin-bottom: 1em; text-align: justify; }
+    .report-content ul { list-style-type: disc; padding-left: 24px; margin-bottom: 16px; }
+    .report-content li { margin-bottom: 8px; }
+    .report-content strong { color: #1d4ed8; font-weight: bold; }
+    .report-content table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 0.9em; }
+    .report-content th { background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 8px; text-align: left; font-weight: bold; color: #334155; }
+    .report-content td { border: 1px solid #cbd5e1; padding: 8px; vertical-align: top; }
 </style>
-""", unsafe_allow_html=True)
+"""
 
-# --- Types & Schema ---
-ANALYSIS_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "title_en": {"type": "STRING", "description": "The original English title."},
-        "title_jp": {"type": "STRING", "description": "Japanese translation of the title."},
-        "journal_authors": {"type": "STRING", "description": "Journal name and author list."},
-        "publication_year": {"type": "STRING", "description": "Year of publication."},
-        "background_objective": {"type": "STRING", "description": "Research background and objective in Japanese."},
-        "results_summary": {"type": "STRING", "description": "Comprehensive summary of results/discussion in Japanese. Must logically connect the experimental data."},
-        "results_figures": {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "label": {"type": "STRING", "description": "e.g., Figure 1"},
-                    "explanation": {"type": "STRING", "description": "Detailed Japanese explanation. If the figure has sub-parts like (a), (b), describe each part specifically."},
-                    "page_number": {"type": "INTEGER", "description": "1-based page number."},
-                    "bbox": {
-                        "type": "ARRAY",
-                        "items": {"type": "INTEGER"},
-                        "description": "[ymin, xmin, ymax, xmax] 0-1000 scale. MUST INCLUDE THE CAPTION TEXT."
-                    }
-                },
-                "required": ["label", "explanation", "page_number", "bbox"]
-            }
-        },
-        "novelty": {"type": "STRING", "description": "Novelty and significance in Japanese."},
-        "conclusion_tasks": {"type": "STRING", "description": "Conclusion and future tasks in Japanese."}
-    },
-    "required": ["title_en", "title_jp", "journal_authors", "publication_year", "background_objective", "results_summary", "results_figures", "novelty", "conclusion_tasks"]
-}
+# --- Logic: Data Compression ---
 
-# --- Helper Functions ---
+def truncate_text(text, max_length):
+    if pd.isna(text) or text == "": return ""
+    s = str(text)
+    return s if len(s) <= max_length else s[:max_length] + "..."
 
-def init_gemini_client():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    # Check st.secrets for Streamlit Cloud
-    if not api_key and "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
+def compress_patent_row(row):
+    priority_keys = ['title', 'invention', 'abstract', 'claim', 'applicant', 'number', 'publication', 'id', '発明', '名称', '要約', '請求', '出願人', '番号']
+    row_dict = row.to_dict()
+    sorted_items = []
+    for k, v in row_dict.items():
+        if pd.isna(v) or v == "": continue
+        k_str = str(k).lower()
+        is_priority = any(pk in k_str for pk in priority_keys)
+        score = 0 if is_priority else 1
+        sorted_items.append((score, k, v))
+    sorted_items.sort(key=lambda x: x[0])
     
-    if not api_key:
-        return None
-    return genai.Client(api_key=api_key)
+    row_string = ""
+    for _, k, v in sorted_items:
+        k_trunc = truncate_text(k, 30)
+        v_trunc = truncate_text(v, 300)
+        row_string += f"{k_trunc}: {v_trunc} | "
+        if len(row_string) > 1500:
+            row_string += "[TRUNCATED]"
+            break
+    return row_string
 
-def analyze_pdf_with_gemini(client, file_bytes):
-    system_instruction = """
-    あなたは優秀な化学者です。英語の化学論文(PDF)を深く読み込み、日本の研究者が理解しやすいように高度な要約を作成してください。
-    
-    以下の点を重視し、情報は省略せず、論理的なつながりを意識して詳細に記述してください:
-    1. タイトルは英語と日本語の両方を出力。
-    2. 雑誌名と著者を特定。
-    3. 【重要】論文の発行年(Publication Year)を必ず特定してください。
-    4. 目的・動機・背景を明確に。
-    5. 「実験結果・考察」は特に深く分析してください:
-         - まず、実験の流れ、条件、主要な発見を含む包括的な要約記述 (results_summary)。ここで図表(Figure, Table, Scheme等)の番号を参照しながら、なぜその実験を行ったのか、結果から何が言えるのかを論理的に説明してください。
-         - その後、個々の図・表・スキーム (Figure, Table, Scheme) についての詳細な解説と、PDF内での位置情報 (results_figures)。
-    
-    【図表情報の抽出に関する極めて重要な指示】:
-    - **bbox (座標)**: 図版のビジュアル部分だけでなく、**その下(または上)にある「Figure X. description...」といったキャプションテキスト全体まで完全に含んだ領域**を指定してください。キャプションが途切れないように広く取ってください。
-    - **explanation (解説)**: 
-        - 単なる翻訳ではなく、その図が結果の文脈で何を意味するかを解説してください。
-        - 図の中に **(a), (b), (c)** などのサブパートがある場合は、解説欄で必ず「(a) ... (b) ...」のように区別して記述してください。
-    
-    出力はJSON形式で行ってください。
+# --- Logic: Gemini API Interaction with Key Rotation ---
+
+# 高速化のために軽量モデルを使用
+MODEL_NAME = 'gemini-flash-lite-latest'
+
+async def generate_with_retry(client, model, contents, config, retries=3):
     """
-    
+    リトライラッパー。Flash Liteは高速なため、バックオフ時間は短めに設定。
+    """
+    base_delay = 5 
+    for attempt in range(retries):
+        try:
+            return await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                if attempt < retries - 1:
+                    wait_time = base_delay * (2 ** attempt)
+                    # 並列実行中にトーストが出すぎるとうっとうしいのでprint/logのみ推奨だが、
+                    # ここではユーザーフィードバック用に控えめに表示
+                    # st.toast(f"⏳ リソース調整中... {wait_time}s待機", icon="🐢")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise Exception(f"API制限(429)により中断: {error_str}")
+            else:
+                raise e
+
+async def analyze_batch(client, rows_text, focus_keywords, exclude_keywords, batch_index, total_batches):
+    """
+    バッチ分析タスク
+    """
+    prompt = f"""
+    あなたは特許分析の専門家です。
+    大規模な特許調査の一部（Batch {batch_index + 1}/{total_batches}）を担当しています。
+    以下の特許データを分析し、中間分析レポートを作成してください。
+
+    ### ユーザーの着目点
+    {focus_keywords or "特になし"}
+
+    ### 除外条件
+    {exclude_keywords or "特になし"}
+
+    ### 出力内容
+    1. **技術クラスター**: このバッチ内の主な技術トピック。
+    2. **重要特許**: 注目すべき特許の抽出（公報番号、出願人、理由）。
+    3. **出願人**: 目立つ出願人。
+
+    ### データ
+    {rows_text}
+    """
     try:
-        response = client.models.generate_content(
-            model='gemini-3-flash-preview',
-            contents=[
-                types.Content(
-                    parts=[
-                        types.Part.from_bytes(data=file_bytes, mime_type='application/pdf'),
-                        types.Part.from_text(text="この論文を解析し、JSON形式で出力してください。bboxは必ずキャプションを含めてください。")
-                    ]
-                )
-            ],
+        response = await generate_with_retry(
+            client=client,
+            model=MODEL_NAME,
+            contents=prompt,
             config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=ANALYSIS_SCHEMA,
-                # Thinking budget increased to 16000 for deeper analysis
-                thinking_config=types.ThinkingConfig(thinking_budget=16000)
+                system_instruction="Analyze the patent batch objectively."
             )
         )
-        return json.loads(response.text)
+        return response.text or ""
     except Exception as e:
-        st.error(f"Analysis Error: {str(e)}")
-        return None
+        return f"Error in batch {batch_index}: {str(e)}"
 
-def extract_images_from_pdf(file_bytes, analysis_data):
-    """PyMuPDFを使ってbboxに基づき画像を切り出す。キャプション切れ防止のためマージンを調整。"""
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    enriched_figures = []
+async def generate_final_report(clients, data_frames, focus_keywords, exclude_keywords):
+    """
+    マルチクライアント・並列処理対応の生成ロジック
+    """
+    total_rows = len(data_frames)
+    compressed_rows = [compress_patent_row(row) for _, row in data_frames.iterrows()]
     
-    for fig in analysis_data.get("results_figures", []):
-        try:
-            page_num = fig.get("page_number", 1) - 1
-            if page_num < 0 or page_num >= len(doc):
-                enriched_figures.append(fig)
-                continue
-                
-            page = doc[page_num]
-            rect = page.rect  # Page size
-            bbox = fig.get("bbox", [])
-            
-            if len(bbox) == 4:
-                # Convert 0-1000 scale to actual PDF coordinates
-                # bbox from Gemini is [ymin, xmin, ymax, xmax]
-                ymin, xmin, ymax, xmax = bbox
-                
-                h = rect.height
-                w = rect.width
-                
-                # --- マージン設定 (ここを強化) ---
-                # キャプションを含めるため、下部(Bottom)を特に広く取る
-                pad_top = 10
-                pad_bottom = 25  # 40でも大きいので25にする
-                pad_horiz = 20
-                
-                y1 = max(0, (ymin / 1000 * h) - pad_top)
-                x1 = max(0, (xmin / 1000 * w) - pad_horiz)
-                y2 = min(h, (ymax / 1000 * h) + pad_bottom)
-                x2 = min(w, (xmax / 1000 * w) + pad_horiz)
-                
-                clip_rect = fitz.Rect(x1, y1, x2, y2)
-                
-                # 解像度を少し上げてテキストを読みやすくする (dpi=200 -> 250)
-                pix = page.get_pixmap(clip=clip_rect, dpi=250)
-                
-                # Convert to PIL Image for Streamlit
-                img_data = pix.tobytes("png")
-                image = Image.open(io.BytesIO(img_data))
-                
-                # Store object for display
-                fig["pil_image"] = image
-                
-        except Exception as e:
-            print(f"Error extracting image: {e}")
+    # Flash Liteはコンテキストウィンドウも十分あるため、
+    # バッチサイズを大きくしてリクエスト数を減らす戦略を維持
+    CHUNK_SIZE = 60 
+    
+    if total_rows <= CHUNK_SIZE:
+        # --- Single Pass ---
+        status_text = f"全{total_rows}件を一括分析中 (Model: {MODEL_NAME})..."
+        yield status_text
         
-        enriched_figures.append(fig)
+        data_string = "\n---\n".join(compressed_rows)
+        # クライアントリストの先頭を使用
+        client = clients[0]
+
+        prompt = f"""
+          あなたは熟練した特許弁理士です。
+          提供された特許リストを元に「特許調査レポート」を作成してください。
+          
+          ### ユーザー指定の条件
+          - **着目キーワード**: {focus_keywords or "全体的な技術トレンド"}
+          - **除外対象**: {exclude_keywords or "特になし"}
+
+          ### レポート構成（HTML形式）
+          1. **全体総括**: 全体的な所感、トレンド。
+          2. **重要特許 (Top Picks)**: <table>タグを使用して整理。
+          3. **技術カテゴリ別詳細**: トピックごとの解説。
+
+          ### データ
+          {data_string}
+        """
+
+        response = await generate_with_retry(
+            client=client,
+            model=MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction="Output raw HTML. Use <table> for patent lists."
+            )
+        )
+        yield clean_html(response.text)
         
-    analysis_data["results_figures"] = enriched_figures
-    return analysis_data
-
-# --- Auth Logic ---
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-
-def check_password():
-    password = st.session_state.password_input
-    # Set your password here or use env var
-    correct_password = os.environ.get("ACCESS_PASSWORD", "chem2025")
-    if password == correct_password:
-        st.session_state.authenticated = True
     else:
-        st.error("パスワードが間違っています")
-
-# --- UI: Login Screen ---
-if not st.session_state.authenticated:
-    st.markdown("<div style='text-align: center; margin-top: 50px;'>", unsafe_allow_html=True)
-    st.title("🔒 ChemAI Analyst Login")
-    st.text_input("アクセスパスワードを入力してください", type="password", key="password_input", on_change=check_password)
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
-
-# --- UI: Main App ---
-st.title("🧪 ChemAI Paper Analyst")
-st.caption("Powered by Gemini 3.0 Flash")
-
-client = init_gemini_client()
-
-if not client:
-    st.warning("⚠️ API Keyが設定されていません。GitHubのSecretsまたは環境変数 `GEMINI_API_KEY` を設定してください。")
-    st.stop()
-
-uploaded_file = st.file_uploader("PDFファイルをアップロードしてください", type="pdf")
-
-if 'analysis_result' not in st.session_state:
-    st.session_state.analysis_result = None
-
-if uploaded_file is not None:
-    # Button to start analysis
-    if st.button("論文を解析する (Deep Analysis)", type="primary"):
-        with st.spinner("Gemini 3.0 Flash が論文を深く読み込んでいます... (思考中...)"):
-            file_bytes = uploaded_file.read()
-            raw_analysis = analyze_pdf_with_gemini(client, file_bytes)
-            
-            if raw_analysis:
-                with st.spinner("図表を切り出しています..."):
-                    final_analysis = extract_images_from_pdf(file_bytes, raw_analysis)
-                    st.session_state.analysis_result = final_analysis
-                st.rerun()
-
-# --- Display Results ---
-result = st.session_state.analysis_result
-
-if result:
-    # Header
-    st.markdown(f"""
-    <div class="report-header">
-        <div class="report-meta">Chemistry Research Summary | {result.get('publication_year', 'N/A')}</div>
-        <div class="report-title">{result['title_jp']}</div>
-        <div style="font-size: 1.1em; color: #4b5563; margin-top: 5px;">{result['title_en']}</div>
-        <div style="margin-top: 15px; font-size: 0.9em;">📖 {result['journal_authors']}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 1. Background
-    st.markdown('<div class="section-header">1. 目的・動機・研究背景</div>', unsafe_allow_html=True)
-    st.write(result['background_objective'])
-
-    # 2. Results
-    st.markdown('<div class="section-header">2. 実験結果・考察</div>', unsafe_allow_html=True)
-    
-    st.markdown(f"""
-    <div class="summary-box">
-        <strong>全体要約:</strong><br>
-        {result['results_summary']}
-    </div>
-    """, unsafe_allow_html=True)
-
-    for fig in result['results_figures']:
-        st.markdown(f"**{fig['label']}** (Page {fig['page_number']})")
+        # --- Map-Reduce Strategy (Parallel) ---
+        chunks = []
+        for i in range(0, total_rows, CHUNK_SIZE):
+            chunks.append(compressed_rows[i : i + CHUNK_SIZE])
         
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if "pil_image" in fig:
-                st.image(fig["pil_image"], use_container_width=True)
-            else:
-                st.info("画像なし")
-        with col2:
-            # Format explanation for better readability of (a), (b), etc.
-            explanation = fig['explanation']
-            # Simple replacement to bold sub-figure labels
-            formatted_explanation = explanation.replace("(a)", "\n\n**(a)**").replace("(b)", "\n\n**(b)**").replace("(c)", "\n\n**(c)**").replace("(d)", "\n\n**(d)**").replace("(e)", "\n\n**(e)**").replace("(f)", "\n\n**(f)**")
+        total_chunks = len(chunks)
+        yield f"大規模データ分析を開始: 全{total_chunks}バッチを並列処理します..."
+        
+        # タスクの作成：キーをローテーションして割り当て
+        tasks = []
+        for i, chunk in enumerate(chunks):
+            client_index = i % len(clients)
+            assigned_client = clients[client_index]
+            chunk_text = "\n---\n".join(chunk)
             
-            st.markdown(formatted_explanation)
-        st.divider()
+            # タスクをリストに追加
+            tasks.append(
+                analyze_batch(assigned_client, chunk_text, focus_keywords, exclude_keywords, i, total_chunks)
+            )
 
-    # 3. Novelty
-    st.markdown('<div class="section-header">3. 新規性・学術的意義</div>', unsafe_allow_html=True)
+        # 並列実行と進捗表示
+        # as_completedを使って、終わった順に結果を受け取る
+        batch_summaries = [""] * total_chunks # 順序保持用のプレースホルダ
+        completed_count = 0
+        
+        # タスクにインデックス情報を付与して実行し、結果を正しい位置に格納する必要がある
+        # 少し工夫してラップする
+        async def run_task_with_index(idx, coro):
+            return idx, await coro
+
+        wrapped_tasks = [run_task_with_index(i, t) for i, t in enumerate(tasks)]
+        
+        for future in asyncio.as_completed(wrapped_tasks):
+            idx, result = await future
+            batch_summaries[idx] = result
+            completed_count += 1
+            yield f"進捗: {completed_count}/{total_chunks} バッチ完了..."
+
+        combined_summaries = "\n\n".join([f"--- Batch {i+1} Report ---\n{s}" for i, s in enumerate(batch_summaries)])
+        
+        yield "全バッチ完了。最終レポートを生成中..."
+        
+        # 最終まとめは、一番休ませた（またはランダムな）クライアントを使用
+        final_client = clients[0] 
+        
+        final_prompt = f"""
+          あなたは特許分析の専門家です。
+          以下は、大規模データを分割分析した「中間レポート」の集合です。
+          これらを統合し、最終的な「特許調査レポート」を作成してください。
+
+          ### ユーザー指定の条件
+          - **着目キーワード**: {focus_keywords or "全体的な技術トレンド"}
+          - **除外対象**: {exclude_keywords or "特になし"}
+
+          ### レポート構成（HTML形式）
+          1. **全体総括**: 全体的なトレンド、注目の出願人など。
+          2. **重要特許ピックアップ**: 中間レポートから特に重要なものを厳選。**必ずHTMLの <table> タグを使用**。
+          3. **技術カテゴリ別詳解**: トピックごとの解説。
+
+          ### 中間レポート集合
+          {combined_summaries}
+        """
+
+        response = await generate_with_retry(
+            client=final_client,
+            model=MODEL_NAME,
+            contents=final_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction="Output raw HTML. Use <table> for lists."
+            )
+        )
+        yield clean_html(response.text)
+
+def clean_html(text):
+    if not text: return ""
+    return text.replace("```html", "").replace("```", "")
+
+# --- Main Application ---
+
+def main():
+    if not check_password():
+        st.stop()
+
+    st.sidebar.title("🔬 PatentInsight AI")
+    st.sidebar.caption("Speed & Bulk Edition")
+    
+    # --- API Key Loading Logic (Multiple Keys) ---
+    api_keys = []
+    
+    # 1. 環境変数/Secretsから複数のキーを探す
+    # API_KEY, API_KEY_1, API_KEY_2 ... API_KEY_10 まで探査
+    candidate_keys = ["API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]
+    for i in range(1, 11):
+        candidate_keys.append(f"API_KEY_{i}")
+        candidate_keys.append(f"GOOGLE_API_KEY_{i}")
+
+    # SecretsとEnvから収集
+    found_keys = set()
+    for key_name in candidate_keys:
+        # Env check
+        if os.environ.get(key_name):
+            val = os.environ.get(key_name).strip()
+            if val and val not in found_keys:
+                found_keys.add(val)
+                api_keys.append(val)
+        # Secrets check
+        elif key_name in st.secrets:
+            val = st.secrets[key_name].strip()
+            if val and val not in found_keys:
+                found_keys.add(val)
+                api_keys.append(val)
+
+    if not api_keys:
+        st.sidebar.error("⛔ API Key Missing")
+        st.error("⚠️ APIキーが見つかりません。Secretsに `API_KEY` または `API_KEY_1`, `API_KEY_2`... を設定してください。")
+        st.stop()
+    
+    st.sidebar.success(f"🔑 {len(api_keys)}個のAPIキーをロードしました")
+    
+    # Create clients for all keys
+    clients = [Client(api_key=k) for k in api_keys]
+
+    st.sidebar.markdown("---")
+    uploaded_file = st.sidebar.file_uploader("Excelファイルをアップロード", type=['xlsx', 'xls', 'xlsm'])
+    focus_keywords = st.sidebar.text_area("着目テーマ・キーワード", height=100)
+    exclude_keywords = st.sidebar.text_area("除外・スキップ条件", height=80)
+
+    st.title("特許調査レポート生成 (Fast Mode)")
     st.markdown(f"""
-    <div class="novelty-box">
-        {result['novelty']}
-    </div>
-    """, unsafe_allow_html=True)
+    Excelデータをアップロードすると、AIが内容を分析してレポートを作成します。
+    **現在のモデル:** `{MODEL_NAME}` (高速・軽量版)
+    **並列処理:** 有効 (キー数: {len(clients)})
+    """)
 
-    # 4. Conclusion
-    st.markdown('<div class="section-header">4. 結論・今後の課題</div>', unsafe_allow_html=True)
-    st.write(result['conclusion_tasks'])
+    if uploaded_file:
+        try:
+            df = pd.read_excel(uploaded_file)
+            st.success(f"ファイル読み込み完了: {len(df)}件のデータ")
+            
+            if st.button("分析開始 (Start Analysis)", type="primary"):
+                result_container = st.empty()
+                progress_bar = st.progress(0)
+                
+                async def run_analysis():
+                    final_html = ""
+                    step = 0
+                    # 複数のクライアントを渡して実行
+                    async for chunk in generate_final_report(clients, df, focus_keywords, exclude_keywords):
+                        step += 1
+                        if len(chunk) < 200:
+                            result_container.info(chunk)
+                        else:
+                            final_html = chunk
+                    return final_html
 
-    # Reset Button
-    if st.button("別の論文を解析する"):
-        st.session_state.analysis_result = None
-        st.rerun()
+                html_content = asyncio.run(run_analysis())
+                
+                progress_bar.progress(100)
+                result_container.empty()
+                
+                if html_content:
+                    st.markdown("### 生成レポート")
+                    full_html = f"{REPORT_CSS}<div class='report-content'>{html_content}</div>"
+                    st.markdown(full_html, unsafe_allow_html=True)
+                    
+                    import streamlit.components.v1 as components
+                    js_code = f"""
+                    <script>
+                    function copyReport() {{
+                        const content = `{html_content.replace('`', '\`').replace('$', '\$')}`;
+                        navigator.clipboard.writeText(content).then(function() {{
+                            alert('コピー完了');
+                        }}, function(err) {{
+                            console.error('Copy failed: ', err);
+                        }});
+                    }}
+                    </script>
+                    <div style="text-align: right; margin-top: 10px;">
+                        <button onclick="parent.document.execCommand('selectAll'); parent.document.execCommand('copy'); alert('レポートをコピーしました。OneNoteに貼り付けてください。');" 
+                        style="background-color: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold;">
+                        📋 レポートを選択してコピー
+                        </button>
+                    </div>
+                    """
+                    components.html(js_code, height=100)
+
+        except Exception as e:
+            st.error(f"エラーが発生しました: {str(e)}")
+
+if __name__ == "__main__":
+    main()
