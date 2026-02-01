@@ -48,7 +48,7 @@ ANALYSIS_SCHEMA = {
                 "type": "OBJECT",
                 "properties": {
                     "label": {"type": "STRING", "description": "e.g., Figure 1"},
-                    "explanation": {"type": "STRING", "description": "Detailed Japanese explanation of what this specific Figure/Table/Scheme shows, interpreted in the context of the results."},
+                    "explanation": {"type": "STRING", "description": "Exhaustive Japanese explanation covering ALL discussions of this Figure/Table/Scheme in the paper. Include specific numerical values, comparison results, reaction conditions, and the authors' interpretations. Do NOT summarize briefly - translate the relevant paper text almost verbatim into Japanese."},
                     "page_number": {"type": "INTEGER", "description": "1-based page number."},
                     "bbox": {
                         "type": "ARRAY",
@@ -118,9 +118,17 @@ def analyze_pdf_with_gemini(api_key, file_bytes):
     5. 「実験結果・考察」は特に深く分析してください:
          - まず、実験の流れ、条件、主要な発見を含む包括的な要約記述 (results_summary)。ここで図表(Figure, Table, Scheme等)の番号を参照しながら、なぜその実験を行ったのか、結果から何が言えるのかを論理的に説明してください。
          - その後、個々の図・表・スキーム (Figure, Table, Scheme) についての詳細な解説と、PDF内での位置情報 (results_figures)。
-    6. 図表やスキームの位置情報(page_number, bbox)は、画像を切り出すために非常に重要ですので、正確に指定してください。bboxは[ymin, xmin, ymax, xmax] (0-1000スケール)です。
-    7. 新規性と学術的な面白さを化学者の視点で深く評価。
-    8. 結論と残された課題。
+    6. 【最重要】results_figuresの各explanationは、論文中でその図表について言及・議論されている内容を**省略せず網羅的に**記述してください:
+         - 論文本文中でその図表を参照している箇所の説明を漏れなく含めること。
+         - 具体的な数値（反応収率、選択性、温度、時間、濃度など）は必ず記載すること。
+         - 比較実験の結果（エントリー間の違い、条件変更による効果など）を詳細に記述すること。
+         - Tableの場合は、主要なエントリーの結果を具体的に言及すること。
+         - Schemeの場合は、反応の各ステップ・条件・試薬を記述すること。
+         - 著者の考察・解釈（なぜその結果になったか、何を示唆するか）も含めること。
+         - 短い要約ではなく、論文の該当箇所をほぼそのまま日本語に翻訳する水準の詳細さを目指してください。
+    7. 図表やスキームの位置情報(page_number, bbox)は、画像を切り出すために非常に重要ですので、正確に指定してください。bboxは[ymin, xmin, ymax, xmax] (0-1000スケール)です。
+    8. 新規性と学術的な面白さを化学者の視点で深く評価。
+    9. 結論と残された課題。
     
     出力はJSON形式で行ってください。
     """
