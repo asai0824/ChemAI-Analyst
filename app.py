@@ -216,7 +216,7 @@ def generate_html_for_clipboard(result):
     suitable for pasting into OneNote/Word.
     """
     html = f"""
-    <div style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; max-width: 800px;">
+    <div style="color: #1f2937; max-width: 800px;">
         <h1 style="font-size: 24px; font-weight: bold; color: #111827; margin-bottom: 8px;">{format_text(result['title_jp'])}</h1>
         <h2 style="font-size: 18px; color: #4b5563; margin-bottom: 8px;">{format_text(result['title_en'])}</h2>
         <div style="margin-bottom: 24px; color: #6b7280; font-size: 14px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px;">
