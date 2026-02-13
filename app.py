@@ -135,7 +135,7 @@ def analyze_pdf_with_gemini(api_key, file_bytes):
     
     try:
         response = client.models.generate_content(
-            model='gemini-3-flash-preview',
+            model='gemini-3-pro-preview',
             contents=[
                 types.Content(
                     parts=[
@@ -272,10 +272,18 @@ def generate_html_for_clipboard(result):
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
+def get_access_password():
+    """Streamlit SecretsまたはENVからパスワードを取得（ハードコード禁止）"""
+    if "ACCESS_PASSWORD" in st.secrets:
+        return st.secrets["ACCESS_PASSWORD"]
+    return os.environ.get("ACCESS_PASSWORD")
+
 def check_password():
     password = st.session_state.password_input
-    # Set your password here or use env var
-    correct_password = os.environ.get("ACCESS_PASSWORD", "chem2025")
+    correct_password = get_access_password()
+    if not correct_password:
+        st.error("ACCESS_PASSWORD が設定されていません。管理者に連絡してください。")
+        return
     if password == correct_password:
         st.session_state.authenticated = True
     else:
@@ -283,6 +291,9 @@ def check_password():
 
 # --- UI: Login Screen ---
 if not st.session_state.authenticated:
+    if not get_access_password():
+        st.error("ACCESS_PASSWORD が Secrets または環境変数に設定されていません。デプロイ設定を確認してください。")
+        st.stop()
     st.markdown("<div style='text-align: center; margin-top: 50px;'>", unsafe_allow_html=True)
     st.title("🔒 ChemAI Analyst Login")
     st.text_input("アクセスパスワードを入力してください", type="password", key="password_input", on_change=check_password)
@@ -291,7 +302,7 @@ if not st.session_state.authenticated:
 
 # --- UI: Main App ---
 st.title("🧪 ChemAI Paper Analyst")
-st.caption("Powered by Gemini 3.0 Flash (Multi-Key Load Balancing)")
+st.caption("Powered by Gemini 3.0 Pro (Multi-Key Load Balancing)")
 
 # Check if at least one key exists
 test_key = get_api_key()
@@ -310,7 +321,7 @@ if uploaded_file is not None:
         # Select a key specifically for this request
         current_api_key = get_api_key()
         
-        with st.spinner("Gemini 3.0 Flash が論文を深く読み込んでいます... (思考中...)"):
+        with st.spinner("Gemini 3.0 Pro が論文を深く読み込んでいます... (思考中...)"):
             file_bytes = uploaded_file.read()
             try:
                 raw_analysis = analyze_pdf_with_gemini(current_api_key, file_bytes)
