@@ -302,7 +302,7 @@ if not st.session_state.authenticated:
 
 # --- UI: Main App ---
 st.title("🧪 ChemAI Paper Analyst")
-st.caption("Powered by Gemini 3.0 Pro (Multi-Key Load Balancing)")
+st.caption("Powered by Gemini 3.1 Pro (Multi-Key Load Balancing)")
 
 # Check if at least one key exists
 test_key = get_api_key()
