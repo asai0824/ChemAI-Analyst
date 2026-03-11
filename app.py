@@ -135,7 +135,7 @@ def analyze_pdf_with_gemini(api_key, file_bytes):
     
     try:
         response = client.models.generate_content(
-            model='gemini-3-pro-preview',
+            model='gemini-3.1-pro-preview',
             contents=[
                 types.Content(
                     parts=[
